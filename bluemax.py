@@ -1,3 +1,5 @@
+# current code shared to my by ExaltedToast
+
 import gbotlib as gbl
 
 SEND_PROP, DELTA_PROP, HOLD_PROP = 0.425, 0.300, 0.200
