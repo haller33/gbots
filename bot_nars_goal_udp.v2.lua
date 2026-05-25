@@ -1,6 +1,7 @@
 #!/usr/bin/env lua
--- bot_nars_goal_udp.lua
--- Galcon learning bot using UDPNAR (no files, no pipes, no TTY issues)
+-- bot_nars_goal_udp_enhanced.lua
+-- Galcon learning bot with more actions and richer beliefs.
+-- Startup, logging, and all external behaviour identical to original.
 
 local socket = require("socket")
 
@@ -10,8 +11,8 @@ local socket = require("socket")
 local UDPNAR_BIN = "/home/synbian/git/clone/NARS/OpenNARS-for-Applications/UDPNAR"  -- adjust if needed
 local UDP_IP = "127.0.0.1"
 local UDP_PORT = 50000
-local TIMESTEP = 10000000          -- 10ms (as in UDPNAR_Test.h)
-local SLEEP_NARS_THINK = 0.05      -- seconds between sending state and reading operations
+local TIMESTEP = 10000000
+local SLEEP_NARS_THINK = 0.05
 
 local MOTOR_BABBLING_CHANCE = 0.4
 local BABBLING_DECAY = 0.998
@@ -23,7 +24,7 @@ local udpnar_pid = nil
 local prev_planet_owners = {}
 
 -----------------------------------------------------------------------
--- Logging to stderr
+-- Logging to stderr (unchanged)
 -----------------------------------------------------------------------
 local function log(...)
     local args = {...}
@@ -33,13 +34,11 @@ local function log(...)
 end
 
 -----------------------------------------------------------------------
--- UDPNAR process management
+-- UDPNAR process management (original, unchanged)
 -----------------------------------------------------------------------
 local function start_udpnar()
-    -- command: UDPNAR <ip> <port> <timestep> <true/false> (the last argument enables verbose? we use true as in test)
     local cmd = string.format("%s %s %d %d true", UDPNAR_BIN, UDP_IP, UDP_PORT, TIMESTEP)
     log("Starting UDPNAR: " .. cmd)
-    -- Run in background and capture PID
     local pid_handle = io.popen(cmd .. " > /dev/null 2>&1 & echo $!", "r")
     if not pid_handle then
         log("ERROR: Failed to start UDPNAR process.")
@@ -57,7 +56,6 @@ local function start_udpnar()
         return nil
     end
     log("UDPNAR started with PID " .. pid)
-    -- Give it a moment to bind the socket
     socket.sleep(0.5)
     return pid
 end
@@ -70,20 +68,18 @@ local function stop_udpnar()
     end
 end
 
--- Register cleanup on script termination
 local function register_cleanup()
     local original_exit = os.exit
     os.exit = function(code)
         stop_udpnar()
         original_exit(code)
     end
-    -- Clean up on error or normal exit
     _G.__atexit = _G.__atexit or {}
     table.insert(_G.__atexit, stop_udpnar)
 end
 
 -----------------------------------------------------------------------
--- UDP communication
+-- UDP communication (unchanged)
 -----------------------------------------------------------------------
 local function send_to_nars(line)
     if not udp then
@@ -96,14 +92,13 @@ end
 
 local function read_udp_operations()
     if not udp then return {} end
-    udp:settimeout(0.01)  -- non‑blocking
+    udp:settimeout(0.01)
     local ops = {}
     while true do
         local data, err = udp:receive()
         if not data then break end
         log(data)
         for line in data:gmatch("[^\r\n]+") do
-            -- Match NARS derived operations: ^action_name(...)
             local action = line:match("^%^([%w_]+)%(")
             if action then
                 if action == "send" then
@@ -126,16 +121,26 @@ local function read_udp_operations()
                     table.insert(ops, {cmd="ACTION", name="do_nothing"})
                 elseif action == "send_half_from_strongest" then
                     table.insert(ops, {cmd="ACTION", name="send_half_from_strongest"})
+                elseif action == "send_all_from_strongest" then
+                    table.insert(ops, {cmd="ACTION", name="send_all_from_strongest"})
+                elseif action == "send_80_percent_from_strongest" then
+                    table.insert(ops, {cmd="ACTION", name="send_80_percent_from_strongest"})
+                elseif action == "send_30_percent_random" then
+                    table.insert(ops, {cmd="ACTION", name="send_30_percent_random"})
+                elseif action == "redirect_half_fleets" then
+                    table.insert(ops, {cmd="ACTION", name="redirect_half_fleets"})
+                elseif action == "wait" then
+                    table.insert(ops, {cmd="ACTION", name="wait"})
                 end
             end
         end
     end
-    udp:settimeout(0)  -- back to blocking
+    udp:settimeout(0)
     return ops
 end
 
 -----------------------------------------------------------------------
--- Game state helpers (identical to your pipes version)
+-- Game state helpers (identical to original, but we add a few new helpers)
 -----------------------------------------------------------------------
 function get_team(g, id)
     local obj = g.items[id]
@@ -168,6 +173,17 @@ function count_ships_by_team(g)
         end
     end
     return counts
+end
+
+function total_production_by_team(g)
+    local prod = {}
+    for _, obj in pairs(g.items) do
+        if obj.type == "planet" then
+            local team = get_team(g, obj.owner)
+            prod[team] = (prod[team] or 0) + obj.production
+        end
+    end
+    return prod
 end
 
 function is_winning(g, team)
@@ -250,68 +266,143 @@ function get_nearest_enemy(g, user_id, from_planet_id)
     return nearest
 end
 
+function get_strongest_enemy_planet(g, user_id)
+    local my_team = get_team(g, user_id)
+    local strongest = nil
+    for _, obj in pairs(g.items) do
+        if obj.type == "planet" then
+            local team = get_team(g, obj.owner)
+            if team ~= 0 and team ~= my_team then
+                if not strongest or obj.ships > strongest.ships then
+                    strongest = obj
+                end
+            end
+        end
+    end
+    return strongest
+end
+
 -----------------------------------------------------------------------
--- Atomic beliefs injection
+-- Atomic beliefs injection (enhanced with many new symbols)
 -----------------------------------------------------------------------
 function inject_beliefs(g)
     local my_ships = total_my_ships(g, g.you)
     local enemy_ships = total_enemy_ships(g, g.you)
     local advantage = my_ships / (my_ships + enemy_ships + 0.01)
 
-    if advantage > 0.7 then
+    -- Advantage categories (more granular)
+    if advantage > 0.9 then
+        send_to_nars("advantage_dominant. :|:")
+    elseif advantage > 0.7 then
         send_to_nars("advantage_high. :|:")
     elseif advantage > 0.4 then
         send_to_nars("advantage_medium. :|:")
-    else
+    elseif advantage > 0.2 then
         send_to_nars("advantage_low. :|:")
+    else
+        send_to_nars("advantage_tiny. :|:")
     end
 
+    -- My total ship categories
+    if my_ships > 100 then
+        send_to_nars("my_ships_plentiful. :|:")
+    elseif my_ships > 40 then
+        send_to_nars("my_ships_adequate. :|:")
+    else
+        send_to_nars("my_ships_scarce. :|:")
+    end
+
+    -- My planet count
+    local my_planet_count = #get_my_planets(g, g.you)
+    if my_planet_count == 0 then
+        send_to_nars("my_planet_count_0. :|:")
+    elseif my_planet_count == 1 then
+        send_to_nars("my_planet_count_1. :|:")
+    elseif my_planet_count == 2 then
+        send_to_nars("my_planet_count_2. :|:")
+    else
+        send_to_nars("my_planet_count_3_plus. :|:")
+    end
+
+    -- Enemy planet count
+    local enemy_planet_count = #get_enemy_planets(g, g.you)
+    if enemy_planet_count == 0 then
+        send_to_nars("enemy_count_0. :|:")
+    elseif enemy_planet_count == 1 then
+        send_to_nars("enemy_count_1. :|:")
+    else
+        send_to_nars("enemy_count_2_plus. :|:")
+    end
+
+    -- Strongest planet info
     local strongest = get_strongest_planet(g, g.you)
     if strongest then
-        if strongest.ships >= 30 then
-            send_to_nars("strong_planet_huge. :|:")
-        elseif strongest.ships >= 15 then
-            send_to_nars("strong_planet_medium. :|:")
+        if strongest.ships >= 40 then
+            send_to_nars("strong_planet_powerful. :|:")
+        elseif strongest.ships >= 20 then
+            send_to_nars("strong_planet_moderate. :|:")
         else
-            send_to_nars("strong_planet_small. :|:")
+            send_to_nars("strong_planet_weak. :|:")
         end
     else
         send_to_nars("no_planet. :|:")
     end
 
+    -- Nearest enemy characteristics
     local nearest = get_nearest_enemy(g, g.you, strongest and strongest.n or nil)
     if nearest then
         if nearest.ships <= 5 then
-            send_to_nars("nearest_enemy_weak. :|:")
-        elseif nearest.ships <= 15 then
-            send_to_nars("nearest_enemy_medium. :|:")
+            send_to_nars("enemy_closest_weak. :|:")
+        elseif nearest.ships <= 20 then
+            send_to_nars("enemy_closest_moderate. :|:")
         else
-            send_to_nars("nearest_enemy_strong. :|:")
+            send_to_nars("enemy_closest_strong. :|:")
         end
         if strongest and distance_between(g, strongest.n, nearest.n) < 200 then
             send_to_nars("enemy_very_close. :|:")
+        elseif strongest and distance_between(g, strongest.n, nearest.n) < 400 then
+            send_to_nars("enemy_close. :|:")
+        else
+            send_to_nars("enemy_far. :|:")
         end
     else
         send_to_nars("no_enemy_planet. :|:")
     end
 
-    if is_winning(g, get_team(g, g.you)) then
+    -- Strongest enemy planet
+    local strongest_enemy = get_strongest_enemy_planet(g, g.you)
+    if strongest_enemy then
+        if strongest_enemy.ships > 20 then
+            send_to_nars("enemy_strong_planet_exists. :|:")
+        end
+    end
+
+    -- Production advantage
+    local prod = total_production_by_team(g)
+    local my_team = get_team(g, g.you)
+    local my_prod = prod[my_team] or 0
+    local enemy_prod = 0
+    for team, p in pairs(prod) do
+        if team ~= 0 and team ~= my_team then
+            enemy_prod = enemy_prod + p
+        end
+    end
+    if my_prod > enemy_prod then
+        send_to_nars("production_advantage. :|:")
+    elseif my_prod < enemy_prod then
+        send_to_nars("production_disadvantage. :|:")
+    else
+        send_to_nars("production_equal. :|:")
+    end
+
+    -- Winning / losing (original)
+    if is_winning(g, my_team) then
         send_to_nars("winning. :|:")
     else
         send_to_nars("losing. :|:")
     end
-
-    local my_planets = get_my_planets(g, g.you)
-    if #my_planets >= 3 then
-        send_to_nars("many_planets. :|:")
-    elseif #my_planets == 0 then
-        send_to_nars("no_planets. :|:")
-    end
 end
 
------------------------------------------------------------------------
--- Goals injection
------------------------------------------------------------------------
 function inject_goals(g)
     local my_ships = total_my_ships(g, g.you)
     local enemy_ships = total_enemy_ships(g, g.you)
@@ -319,14 +410,14 @@ function inject_goals(g)
     send_to_nars(string.format("advantage! :|: %%%f%%", advantage))
 
     if not get_strongest_planet(g, g.you) then
-        send_to_nars("strong_planet_medium! :|: %1.0%")
+        send_to_nars("strong_planet_moderate! :|: %1.0%")
     end
 
     send_to_nars("capture_success! :|: %1.0%")
 end
 
 -----------------------------------------------------------------------
--- Capture detection and reward events
+-- Capture detection (unchanged)
 -----------------------------------------------------------------------
 function detect_captures(g)
     if not prev_planet_owners[g.you] then
@@ -358,7 +449,7 @@ function detect_captures(g)
 end
 
 -----------------------------------------------------------------------
--- Atomic actions (direct Galcon commands)
+-- Atomic actions (new ones added)
 -----------------------------------------------------------------------
 function action_send_strong_to_nearest(g)
     local source = get_strongest_planet(g, g.you)
@@ -393,6 +484,7 @@ function action_redirect_all_to_weakest(g)
 end
 
 function action_do_nothing(g) end
+function action_wait(g) end  -- alias for do_nothing
 
 function action_send_half_from_strongest(g)
     local source = get_strongest_planet(g, g.you)
@@ -400,6 +492,53 @@ function action_send_half_from_strongest(g)
     local target = get_nearest_enemy(g, g.you, source.n)
     if not target then return end
     io.stdout:write(string.format("/SEND %d %d %d\n", 50, source.n, target.n))
+    io.stdout:flush()
+end
+
+function action_send_all_from_strongest(g)
+    local source = get_strongest_planet(g, g.you)
+    if not source then return end
+    local target = get_nearest_enemy(g, g.you, source.n)
+    if not target then return end
+    io.stdout:write(string.format("/SEND %d %d %d\n", 100, source.n, target.n))
+    io.stdout:flush()
+end
+
+function action_send_80_percent_from_strongest(g)
+    local source = get_strongest_planet(g, g.you)
+    if not source then return end
+    local target = get_nearest_enemy(g, g.you, source.n)
+    if not target then return end
+    io.stdout:write(string.format("/SEND %d %d %d\n", 80, source.n, target.n))
+    io.stdout:flush()
+end
+
+function action_send_30_percent_random(g)
+    local my_planets = get_my_planets(g, g.you)
+    if #my_planets == 0 then return end
+    local enemy_planets = get_enemy_planets(g, g.you)
+    if #enemy_planets == 0 then return end
+    local source = my_planets[math.random(#my_planets)]
+    local target = enemy_planets[math.random(#enemy_planets)]
+    io.stdout:write(string.format("/SEND %d %d %d\n", 30, source.n, target.n))
+    io.stdout:flush()
+end
+
+function action_redirect_half_fleets(g)
+    local weakest = get_weakest_enemy(g, g.you)
+    if not weakest then return end
+    local fleets = {}
+    for _, fleet in pairs(g.items) do
+        if fleet.type == "fleet" and fleet.owner == g.you then
+            table.insert(fleets, fleet)
+        end
+    end
+    -- Redirect half (rounded up)
+    local to_redirect = math.ceil(#fleets / 2)
+    for i = 1, to_redirect do
+        local fleet = fleets[i]
+        io.stdout:write(string.format("/REDIR %d %d\n", fleet.source, weakest.n))
+    end
     io.stdout:flush()
 end
 
@@ -417,16 +556,24 @@ function execute_operation(g, op)
             action_send_weak_to_random(g)
         elseif op.name == "redirect_all_to_weakest" then
             action_redirect_all_to_weakest(g)
-        elseif op.name == "do_nothing" then
+        elseif op.name == "do_nothing" or op.name == "wait" then
             action_do_nothing(g)
         elseif op.name == "send_half_from_strongest" then
             action_send_half_from_strongest(g)
+        elseif op.name == "send_all_from_strongest" then
+            action_send_all_from_strongest(g)
+        elseif op.name == "send_80_percent_from_strongest" then
+            action_send_80_percent_from_strongest(g)
+        elseif op.name == "send_30_percent_random" then
+            action_send_30_percent_random(g)
+        elseif op.name == "redirect_half_fleets" then
+            action_redirect_half_fleets(g)
         end
     end
 end
 
 -----------------------------------------------------------------------
--- Main bot decision (called on each /TICK)
+-- Main bot decision (motor babbling includes new actions)
 -----------------------------------------------------------------------
 function bot(g)
     detect_captures(g)
@@ -442,7 +589,12 @@ function bot(g)
             "send_weak_to_random",
             "redirect_all_to_weakest",
             "do_nothing",
-            "send_half_from_strongest"
+            "send_half_from_strongest",
+            "send_all_from_strongest",
+            "send_80_percent_from_strongest",
+            "send_30_percent_random",
+            "redirect_half_fleets",
+            "wait"
         }
         local choice = actions[math.random(#actions)]
         if choice == "send_strong_to_nearest" then
@@ -453,6 +605,14 @@ function bot(g)
             action_redirect_all_to_weakest(g)
         elseif choice == "send_half_from_strongest" then
             action_send_half_from_strongest(g)
+        elseif choice == "send_all_from_strongest" then
+            action_send_all_from_strongest(g)
+        elseif choice == "send_80_percent_from_strongest" then
+            action_send_80_percent_from_strongest(g)
+        elseif choice == "send_30_percent_random" then
+            action_send_30_percent_random(g)
+        elseif choice == "redirect_half_fleets" then
+            action_redirect_half_fleets(g)
         else
             action_do_nothing(g)
         end
@@ -466,7 +626,7 @@ function bot(g)
 end
 
 -----------------------------------------------------------------------
--- Protocol parser (unchanged from your pipes version)
+-- Protocol parser (unchanged from original)
 -----------------------------------------------------------------------
 function split(str, delim)
     local r = {}
@@ -548,7 +708,7 @@ function sync(g, t)
 end
 
 -----------------------------------------------------------------------
--- Main entry point
+-- Main entry point (unchanged)
 -----------------------------------------------------------------------
 function main()
     udpnar_pid = start_udpnar()
